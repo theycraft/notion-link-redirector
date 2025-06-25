@@ -1,6 +1,6 @@
-const fetch = require('node-fetch');
+import fetch from 'node-fetch';
 
-exports.handler = async (event) => {
+export async function handler(event) {
   const shortId = event.path.replace(/^\//, '');
   const notionToken = process.env.NOTION_KEY;
   const notionDb = process.env.NOTION_DB;
@@ -71,4 +71,4 @@ exports.handler = async (event) => {
       body: `Server error: ${err.message}`
     };
   }
-};
+}
