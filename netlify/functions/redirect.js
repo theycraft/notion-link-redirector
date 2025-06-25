@@ -1,7 +1,7 @@
 const fetch = require('node-fetch');
 
 exports.handler = async (event) => {
-  const shortId = event.path.replace(/^//, '');
+  const shortId = event.path.replace(/^\//, '');
   const notionToken = process.env.NOTION_KEY;
   const notionDb = process.env.NOTION_DB;
 
