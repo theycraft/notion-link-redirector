@@ -1,7 +1,7 @@
 const fetch = require('node-fetch');
 
 exports.handler = async (event) => {
-  const shortId = event.path.replace(/^\//, '');
+  const shortId = event.path.replace(/^//, '');
   const notionToken = process.env.NOTION_KEY;
   const notionDb = process.env.NOTION_DB;
 
@@ -28,7 +28,7 @@ exports.handler = async (event) => {
     });
 
     const data = await res.json();
-    const match = data.results?.[0];
+    const match = data.results && data.results[0];
 
     if (!match) {
       return { statusCode: 404, body: 'Short ID not found.' };
@@ -36,7 +36,9 @@ exports.handler = async (event) => {
 
     const pageId = match.id;
     let url = match.properties.URL.url;
-    const clicks = match.properties.Clicks?.number || 0;
+    const clicks = match.properties.Clicks && match.properties.Clicks.number
+      ? match.properties.Clicks.number
+      : 0;
 
     if (!/^https?:\/\//i.test(url)) {
       url = 'https://' + url;
