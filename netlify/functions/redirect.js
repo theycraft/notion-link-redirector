@@ -50,7 +50,7 @@ exports.handler = async (event) => {
           Clicks: { number: clicks + 1 },
           'Last Clicked': {
             date: { start: new Date().toISOString() },
-          },
+          }
         },
       }),
     });
