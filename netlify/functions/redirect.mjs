@@ -1,5 +1,3 @@
-import fetch from 'node-fetch';
-
 export async function handler(event) {
   const shortId = event.path.replace(/^\//, '');
   const notionToken = process.env.NOTION_KEY;
