@@ -1,30 +1,30 @@
 const fetch = require('node-fetch');
 
 exports.handler = async (event) => {
-  const shortId = event.path.replace(/^\\//, '');
+  const shortId = event.path.replace(/^\//, '');
   const notionToken = process.env.NOTION_KEY;
   const notionDb = process.env.NOTION_DB;
 
   const notionHeaders = {
     'Authorization': `Bearer ${notionToken}`,
     'Notion-Version': '2022-06-28',
-    'Content-Type': 'application/json',
+    'Content-Type': 'application/json'
   };
 
   const filterPayload = {
     filter: {
       property: 'Short ID',
       rich_text: {
-        equals: shortId,
-      },
-    },
+        equals: shortId
+      }
+    }
   };
 
   try {
     const res = await fetch(`https://api.notion.com/v1/databases/${notionDb}/query`, {
       method: 'POST',
       headers: notionHeaders,
-      body: JSON.stringify(filterPayload),
+      body: JSON.stringify(filterPayload)
     });
 
     const data = await res.json();
@@ -38,7 +38,7 @@ exports.handler = async (event) => {
     let url = match.properties.URL.url;
     const clicks = match.properties.Clicks?.number || 0;
 
-    if (!/^https?:\\/\\//i.test(url)) {
+    if (!/^https?:\/\//i.test(url)) {
       url = 'https://' + url;
     }
 
@@ -49,24 +49,24 @@ exports.handler = async (event) => {
         properties: {
           Clicks: { number: clicks + 1 },
           'Last Clicked': {
-            date: { start: new Date().toISOString() },
+            date: { start: new Date().toISOString() }
           }
-        },
-      }),
+        }
+      })
     });
 
     return {
       statusCode: 302,
       headers: {
         Location: url,
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache'
       },
-      body: '',
+      body: ''
     };
   } catch (err) {
     return {
       statusCode: 500,
-      body: `Server error: ${err.message}`,
+      body: `Server error: ${err.message}`
     };
   }
 };
