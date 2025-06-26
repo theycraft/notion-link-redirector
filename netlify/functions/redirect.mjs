@@ -1,5 +1,8 @@
 // Netlify Function: redirect links and track clicks in Notion
 exports.handler = async function(event) {
+  // Only count clicks on GET requests
+  const method = event.httpMethod;
+  
   // Extract short ID from path (e.g. /abc123)
   const shortId = event.path.replace(/^\//, '');
 
@@ -48,27 +51,30 @@ exports.handler = async function(event) {
       url = `https://${url}`;
     }
 
-    // Calculate new click count
-    const clicksProp = page.properties.Clicks;
-    const clicks = clicksProp && typeof clicksProp.number === 'number'
-      ? clicksProp.number
-      : 0;
+    // If a GET request, update click count
+    if (method === 'GET') {
+      const clicksProp = page.properties.Clicks;
+      const clicks =
+        clicksProp && typeof clicksProp.number === 'number'
+          ? clicksProp.number
+          : 0;
 
-    // Update click count and timestamp in Notion
-    await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-      method: 'PATCH',
-      headers: notionHeaders,
-      body: JSON.stringify({
-        properties: {
-          Clicks: { number: clicks + 1 },
-          'Last Clicked': {
-            date: { start: new Date().toISOString() }
+      // Update click count and timestamp in Notion
+      await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+        method: 'PATCH',
+        headers: notionHeaders,
+        body: JSON.stringify({
+          properties: {
+            Clicks: { number: clicks + 1 },
+            'Last Clicked': {
+              date: { start: new Date().toISOString() }
+            }
           }
-        }
-      })
-    });
+        })
+      });
+    }
 
-    // Return an HTTP redirect
+    // Return an HTTP redirect for all methods
     return {
       statusCode: 302,
       headers: { Location: url },
