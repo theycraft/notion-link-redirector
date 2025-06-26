@@ -1,4 +1,4 @@
-// Netlify Function: redirect links and track clicks in Notion
+// Netlify Function: redirect links and track clicks in Notion, with bot filtering
 exports.handler = async function(event) {
   const method = event.httpMethod;
   const shortId = event.path.replace(/^\//, '');
@@ -12,6 +12,10 @@ exports.handler = async function(event) {
     'Content-Type': 'application/json'
   };
 
+  // Basic bot filter: skip known crawler UAs
+  const userAgent = event.headers['user-agent'] || '';
+  const isBot = /bot|crawl|spider|slurp|facebookexternalhit|twitterbot/i.test(userAgent);
+
   const filterPayload = {
     filter: {
       property: 'Short ID',
@@ -20,6 +24,7 @@ exports.handler = async function(event) {
   };
 
   try {
+    // Query the Notion database for the matching short ID
     const queryRes = await fetch(
       `https://api.notion.com/v1/databases/${notionDb}/query`,
       { method: 'POST', headers: notionHeaders, body: JSON.stringify(filterPayload) }
@@ -35,8 +40,8 @@ exports.handler = async function(event) {
     let url = page.properties.URL.url;
     if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
 
-    // Only increment on GET and avoid double-counts within 30s
-    if (method === 'GET') {
+    // Increment click count only on real GET requests, not bots, and debounce
+    if (method === 'GET' && !isBot) {
       const clicksProp = page.properties.Clicks;
       const clicks = clicksProp && typeof clicksProp.number === 'number' ? clicksProp.number : 0;
       const lastClickedProp = page.properties['Last Clicked'];
@@ -45,6 +50,7 @@ exports.handler = async function(event) {
         : 0;
       const now = Date.now();
 
+      // Avoid counting multiple hits within 30 seconds
       if (now - lastClickedTime > 30000) {
         await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
           method: 'PATCH',
@@ -59,6 +65,7 @@ exports.handler = async function(event) {
       }
     }
 
+    // Perform the redirect
     return { statusCode: 302, headers: { Location: url }, body: '' };
   } catch (error) {
     return { statusCode: 500, body: `Server error: ${error.message}` };
