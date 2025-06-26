@@ -18,6 +18,9 @@ exports.handler = async function(event) {
   const userAgent = (event.headers['user-agent'] || '') + '';
   const referer = event.headers['referer'] || '';
   const isBot = /bot|crawl|spider|slurp|facebookexternalhit|twitterbot|twitterbot|preview|notion/i.test(userAgent) || referer.includes('notion.so');
+    // Also skip known AWS datacenter IPs used by Notion previews
+    const awsIp = clientIp.startsWith('54.') || clientIp.startsWith('52.') || clientIp.startsWith('34.');
+    if (awsIp) isBot = true;
 
   // Capture client IP (first in X-Forwarded-For)
   const forwarded = event.headers['x-forwarded-for'] || '';
