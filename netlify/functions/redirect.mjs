@@ -18,12 +18,14 @@ exports.handler = async function(event) {
   const ref = (event.headers['referer'] || '').toLowerCase();
   const isBotUA = /bot|crawl|spider|slurp|facebookexternalhit|twitterbot|preview|notion/i.test(ua) || ref.includes('notion.so');
 
-  // Capture client IP
+  // Capture client IP and flag known data-center ranges
   const forwarded = event.headers['x-forwarded-for'] || '';
   const clientIp = forwarded.split(',')[0].trim();
+  // Filter AWS (54.*, 52.*, 34.*) and AWS Dublin (13.*) ranges
+  const isDataCenterIp = /^(54|52|34|13)\./.test(clientIp);
 
-  // If UA indicates bot or preview, skip DB updates
-  if (isBotUA) {
+  // If UA indicates bot or IP is from a data center, skip DB updates
+  if (isBotUA || isDataCenterIp) {
     const url = await getUrlWithoutUpdate(notionHeaders, notionDb, shortId);
     return { statusCode: 302, headers: { Location: url }, body: '' };
   }
