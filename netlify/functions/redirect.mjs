@@ -1,4 +1,4 @@
-// Netlify Function: redirect links, track clicks, record last IP, and filter out bot/previews
+// Netlify Function: redirect links, track clicks, record last IP, countries, cities, and filter bots
 const lastClickMap = {};
 
 exports.handler = async function(event) {
@@ -14,76 +14,93 @@ exports.handler = async function(event) {
     'Content-Type': 'application/json'
   };
 
-  // Bot and preview filter: skip known crawlers and Notion preview fetches
-  const userAgent = (event.headers['user-agent'] || '') + '';
+  // Bot filter: skip known crawlers and Notion previews
+  const userAgent = (event.headers['user-agent'] || '');
   const referer = event.headers['referer'] || '';
-  const isBot = /bot|crawl|spider|slurp|facebookexternalhit|twitterbot|twitterbot|preview|notion/i.test(userAgent) || referer.includes('notion.so');
-    // Also skip known AWS datacenter IPs used by Notion previews
-    const awsIp = clientIp.startsWith('54.') || clientIp.startsWith('52.') || clientIp.startsWith('34.');
-    if (awsIp) isBot = true;
+  let isBot = /bot|crawl|spider|slurp|facebookexternalhit|twitterbot|preview|notion/i.test(userAgent) || referer.includes('notion.so');
 
-  // Capture client IP (first in X-Forwarded-For)
+  // Capture client IP
   const forwarded = event.headers['x-forwarded-for'] || '';
   const clientIp = forwarded.split(',')[0].trim();
+  // Mark AWS IPs as bots
+  if (/^(54|52|34)\./.test(clientIp)) isBot = true;
 
   try {
     // Debounce valid GET hits
     if (method === 'GET' && !isBot) {
       const now = Date.now();
-      const last = lastClickMap[shortId] || 0;
-      if (now - last < 30000) {
+      if (lastClickMap[shortId] && now - lastClickMap[shortId] < 30000) {
         const url = await getUrlWithoutUpdate(notionHeaders, notionDb, shortId);
         return { statusCode: 302, headers: { Location: url }, body: '' };
       }
       lastClickMap[shortId] = now;
     }
 
-    // Query Notion for the page row
-    const queryRes = await fetch(
-      `https://api.notion.com/v1/databases/${notionDb}/query`,
-      { method: 'POST', headers: notionHeaders, body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } }) }
-    );
-    const data = await queryRes.json();
-    if (!Array.isArray(data.results) || data.results.length === 0) {
+    // Query the row
+    const queryRes = await fetch(`https://api.notion.com/v1/databases/${notionDb}/query`, {
+      method: 'POST', headers: notionHeaders,
+      body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } })
+    });
+    const result = await queryRes.json();
+    if (!Array.isArray(result.results) || result.results.length === 0) {
       return { statusCode: 404, body: 'Short ID not found.' };
     }
-
-    const page = data.results[0];
+    const page = result.results[0];
     const pageId = page.id;
     let url = page.properties.URL.url;
     if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
 
-    // Prepare Notion update properties
+    // Geo-lookup via free IP API
+    let country = 'unknown', city = 'unknown';
+    try {
+      const geo = await fetch(`https://ipapi.co/${clientIp}/json/`).then(r=>r.json());
+      country = geo.country_name || country;
+      city = geo.city || city;
+    } catch {}
+
+    // Prepare Notion update
     const props = {};
+    // Click count and timestamp
     if (method === 'GET' && !isBot) {
-      const clicksProp = page.properties.Clicks;
-      const clicks = clicksProp && typeof clicksProp.number === 'number' ? clicksProp.number : 0;
+      const clicks = page.properties.Clicks.number || 0;
       props.Clicks = { number: clicks + 1 };
       props['Last Clicked'] = { date: { start: new Date().toISOString() } };
     }
-    props['Last IP'] = { rich_text: [{ text: { content: clientIp || 'unknown' } }] };
+    // Last IP
+    props['Last IP'] = { rich_text: [{ text: { content: clientIp }}] };
 
-    // Send update to Notion
-    await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-      method: 'PATCH', headers: notionHeaders, body: JSON.stringify({ properties: props })
-    });
+    // Multi-select for countries
+    const existingCountries = (page.properties.Countries.multi_select || []).map(i=>i.name);
+    if (!existingCountries.includes(country) && country !== 'unknown') {
+      props.Countries = { multi_select: existingCountries.map(name=>({ name })).concat({ name: country }) };
+    }
+    // Multi-select for cities
+    const existingCities = (page.properties.Cities.multi_select || []).map(i=>i.name);
+    if (!existingCities.includes(city) && city !== 'unknown') {
+      props.Cities = { multi_select: existingCities.map(name=>({ name })).concat({ name: city }) };
+    }
+
+    // Send update if any
+    if (Object.keys(props).length) {
+      await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+        method: 'PATCH', headers: notionHeaders,
+        body: JSON.stringify({ properties: props })
+      });
+    }
 
     // Redirect
     return { statusCode: 302, headers: { Location: url }, body: '' };
-  } catch (error) {
-    return { statusCode: 500, body: `Server error: ${error.message}` };
+  } catch (e) {
+    return { statusCode: 500, body: `Server error: ${e.message}` };
   }
 };
 
-// Helper to fetch URL without updating
-async function getUrlWithoutUpdate(notionHeaders, notionDb, shortId) {
-  const r = await fetch(
-    `https://api.notion.com/v1/databases/${notionDb}/query`,
-    { method: 'POST', headers: notionHeaders, body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } }) }
-  );
+async function getUrlWithoutUpdate(headers, db, shortId) {
+  const r = await fetch(`https://api.notion.com/v1/databases/${db}/query`, {
+    method: 'POST', headers, body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } })
+  });
   const d = await r.json();
-  const p = d.results[0];
-  let u = p.properties.URL.url;
+  let u = d.results[0].properties.URL.url;
   if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
   return u;
 }
