@@ -1,4 +1,5 @@
-// Netlify Function: redirect links, track clicks, record last IP, countries, cities, and filter bots
+// Netlify Function: redirect links, track clicks & location, record last IP
+// Skips all updates if request is from a bot or AWS datacenter
 const lastClickMap = {};
 
 exports.handler = async function(event) {
@@ -7,80 +8,89 @@ exports.handler = async function(event) {
 
   const notionToken = process.env.NOTION_KEY;
   const notionDb = process.env.NOTION_DB;
-
   const notionHeaders = {
     Authorization: `Bearer ${notionToken}`,
     'Notion-Version': '2022-06-28',
     'Content-Type': 'application/json'
   };
 
-  // Bot filter: skip known crawlers and Notion previews
-  const userAgent = (event.headers['user-agent'] || '');
-  const referer = event.headers['referer'] || '';
-  let isBot = /bot|crawl|spider|slurp|facebookexternalhit|twitterbot|preview|notion/i.test(userAgent) || referer.includes('notion.so');
+  // Detect bots/crawlers and Notion preview UAs
+  const ua = (event.headers['user-agent'] || '').toLowerCase();
+  const ref = (event.headers['referer'] || '').toLowerCase();
+  const isBotUA = /bot|crawl|spider|slurp|preview|notion/i.test(ua) || ref.includes('notion.so');
 
-  // Capture client IP
+  // Capture and detect AWS IPs
   const forwarded = event.headers['x-forwarded-for'] || '';
   const clientIp = forwarded.split(',')[0].trim();
-  // Mark AWS IPs as bots
-  if (/^(54|52|34)\./.test(clientIp)) isBot = true;
+  const isAws = /^(54|52|34)\./.test(clientIp);
+
+  // If bot or AWS preview, immediately redirect without any DB update
+  if (isBotUA || isAws) {
+    const url = await getUrlWithoutUpdate(notionHeaders, notionDb, shortId);
+    return { statusCode: 302, headers: { Location: url }, body: '' };
+  }
+
+  // Debounce human GET requests (30s)
+  if (method === 'GET') {
+    const now = Date.now();
+    if (lastClickMap[shortId] && now - lastClickMap[shortId] < 30000) {
+      const url = await getUrlWithoutUpdate(notionHeaders, notionDb, shortId);
+      return { statusCode: 302, headers: { Location: url }, body: '' };
+    }
+    lastClickMap[shortId] = now;
+  }
 
   try {
-    // Debounce valid GET hits
-    if (method === 'GET' && !isBot) {
-      const now = Date.now();
-      if (lastClickMap[shortId] && now - lastClickMap[shortId] < 30000) {
-        const url = await getUrlWithoutUpdate(notionHeaders, notionDb, shortId);
-        return { statusCode: 302, headers: { Location: url }, body: '' };
-      }
-      lastClickMap[shortId] = now;
-    }
-
-    // Query the row
-    const queryRes = await fetch(`https://api.notion.com/v1/databases/${notionDb}/query`, {
-      method: 'POST', headers: notionHeaders,
-      body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } })
-    });
-    const result = await queryRes.json();
-    if (!Array.isArray(result.results) || result.results.length === 0) {
+    // Query Notion for the page
+    const queryRes = await fetch(
+      `https://api.notion.com/v1/databases/${notionDb}/query`,
+      { method: 'POST', headers: notionHeaders,
+        body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } }) }
+    );
+    const data = await queryRes.json();
+    if (data.results?.length === 0) {
       return { statusCode: 404, body: 'Short ID not found.' };
     }
-    const page = result.results[0];
+    const page = data.results[0];
     const pageId = page.id;
+
+    // Normalize destination URL
     let url = page.properties.URL.url;
     if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
 
-    // Geo-lookup via free IP API
+    // Geo-lookup (country & city)
     let country = 'unknown', city = 'unknown';
     try {
-      const geo = await fetch(`https://ipapi.co/${clientIp}/json/`).then(r=>r.json());
+      const geo = await fetch(`https://ipapi.co/${clientIp}/json/`).then(r => r.json());
       country = geo.country_name || country;
-      city = geo.city || city;
+      city    = geo.city || city;
     } catch {}
 
-    // Prepare Notion update
+    // Build properties to update
     const props = {};
-    // Click count and timestamp
-    if (method === 'GET' && !isBot) {
-      const clicks = page.properties.Clicks.number || 0;
-      props.Clicks = { number: clicks + 1 };
+
+    // Increment clicks and timestamp
+    if (method === 'GET') {
+      const currentClicks = page.properties.Clicks?.number || 0;
+      props.Clicks = { number: currentClicks + 1 };
       props['Last Clicked'] = { date: { start: new Date().toISOString() } };
-    }
-    // Last IP
-    props['Last IP'] = { rich_text: [{ text: { content: clientIp }}] };
 
-    // Multi-select for countries
-    const existingCountries = (page.properties.Countries.multi_select || []).map(i=>i.name);
-    if (!existingCountries.includes(country) && country !== 'unknown') {
-      props.Countries = { multi_select: existingCountries.map(name=>({ name })).concat({ name: country }) };
-    }
-    // Multi-select for cities
-    const existingCities = (page.properties.Cities.multi_select || []).map(i=>i.name);
-    if (!existingCities.includes(city) && city !== 'unknown') {
-      props.Cities = { multi_select: existingCities.map(name=>({ name })).concat({ name: city }) };
+      // Append country in multi-select
+      const existingCountries = page.properties.Countries?.multi_select?.map(i => i.name) || [];
+      if (country !== 'unknown' && !existingCountries.includes(country)) {
+        props.Countries = { multi_select: [...existingCountries.map(n=>({name:n})), {name: country}] };
+      }
+      // Append city in multi-select
+      const existingCities = page.properties.Cities?.multi_select?.map(i => i.name) || [];
+      if (city !== 'unknown' && !existingCities.includes(city)) {
+        props.Cities = { multi_select: [...existingCities.map(n=>({name:n})), {name: city}] };
+      }
     }
 
-    // Send update if any
+    // Always record last IP for human requests
+    props['Last IP'] = { rich_text: [{ text: { content: clientIp || 'unknown' } }] };
+
+    // Send update if any props exist
     if (Object.keys(props).length) {
       await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
         method: 'PATCH', headers: notionHeaders,
@@ -90,17 +100,20 @@ exports.handler = async function(event) {
 
     // Redirect
     return { statusCode: 302, headers: { Location: url }, body: '' };
-  } catch (e) {
-    return { statusCode: 500, body: `Server error: ${e.message}` };
+
+  } catch (err) {
+    return { statusCode: 500, body: `Server error: ${err.message}` };
   }
 };
 
+// Helper to fetch URL without updating DB
 async function getUrlWithoutUpdate(headers, db, shortId) {
   const r = await fetch(`https://api.notion.com/v1/databases/${db}/query`, {
-    method: 'POST', headers, body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } })
+    method: 'POST', headers,
+    body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } })
   });
   const d = await r.json();
-  let u = d.results[0].properties.URL.url;
+  let u = d.results[0]?.properties.URL.url || '';
   if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
   return u;
 }
