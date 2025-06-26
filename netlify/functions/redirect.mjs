@@ -13,107 +13,114 @@ exports.handler = async function(event) {
     'Content-Type': 'application/json'
   };
 
-  // Detect bots/crawlers, Notion preview, Facebook, Twitter bots
+  // Detect bots/crawlers, Notion preview, social media bots
   const ua = (event.headers['user-agent'] || '').toLowerCase();
   const ref = (event.headers['referer'] || '').toLowerCase();
   const isBotUA = /bot|crawl|spider|slurp|facebookexternalhit|twitterbot|preview|notion/i.test(ua) || ref.includes('notion.so');
 
-  // Capture client IP and flag known data-center ranges
+  // Capture client IP and flag data-center ranges
   const forwarded = event.headers['x-forwarded-for'] || '';
   const clientIp = forwarded.split(',')[0].trim();
-  // Filter AWS (54.*, 52.*, 34.*) and AWS Dublin (13.*) ranges
   const isDataCenterIp = /^(54|52|34|13)\./.test(clientIp);
 
-  // If UA indicates bot or IP is from a data center, skip DB updates
+  // Skip updates for bots or data-center IPs
   if (isBotUA || isDataCenterIp) {
-    const url = await getUrlWithoutUpdate(notionHeaders, notionDb, shortId);
-    return { statusCode: 302, headers: { Location: url }, body: '' };
+    const redirectUrl = await fetchUrl(shortId, notionHeaders, notionDb);
+    return { statusCode: 302, headers: { Location: redirectUrl }, body: '' };
   }
 
-  // Debounce human GET requests (30s)
+  // Debounce repeated GETs
   if (method === 'GET') {
     const now = Date.now();
     if (lastClickMap[shortId] && now - lastClickMap[shortId] < 30000) {
-      const url = await getUrlWithoutUpdate(notionHeaders, notionDb, shortId);
-      return { statusCode: 302, headers: { Location: url }, body: '' };
+      const redirectUrl = await fetchUrl(shortId, notionHeaders, notionDb);
+      return { statusCode: 302, headers: { Location: redirectUrl }, body: '' };
     }
     lastClickMap[shortId] = now;
   }
 
   try {
-    // Query Notion for the page
+    // Query Notion for the record
     const queryRes = await fetch(
       `https://api.notion.com/v1/databases/${notionDb}/query`,
-      { method: 'POST', headers: notionHeaders,
-        body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } }) }
+      {
+        method: 'POST',
+        headers: notionHeaders,
+        body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } })
+      }
     );
     const data = await queryRes.json();
-    if (data.results?.length === 0) {
+    if (!data.results || data.results.length === 0) {
       return { statusCode: 404, body: 'Short ID not found.' };
     }
     const page = data.results[0];
     const pageId = page.id;
 
-    // Normalize destination URL
-    let url = page.properties.URL.url;
-    if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+    // Determine redirect URL
+    let url = page.properties.URL.url || '';
+    if (url && !/^https?:\/\//i.test(url)) url = `https://${url}`;
 
     // Geo-lookup (country & city)
-    let country = 'unknown', city = 'unknown';
+    let country = 'unknown';
+    let city = 'unknown';
     try {
-      const geo = await fetch(`https://ipapi.co/${clientIp}/json/`).then(r => r.json());
-      country = geo.country_name || country;
-      city    = geo.city || city;
-    } catch {}
+      const geoRes = await fetch(`https://ipapi.co/${clientIp}/json/`);
+      const geoData = await geoRes.json();
+      country = geoData.country_name || country;
+      city = geoData.city || city;
+    } catch (e) {
+      // ignore lookup errors
+    }
 
-    // Build properties to update
+    // Build properties update
     const props = {};
 
-    // Increment clicks and timestamp
+    // If GET, increment clicks and append location
     if (method === 'GET') {
-      const currentClicks = page.properties.Clicks?.number || 0;
-      props.Clicks = { number: currentClicks + 1 };
+      const clicks = page.properties.Clicks?.number || 0;
+      props.Clicks = { number: clicks + 1 };
       props['Last Clicked'] = { date: { start: new Date().toISOString() } };
 
-      // Append country in multi-select
-      const existingCountries = page.properties.Countries?.multi_select?.map(i => i.name) || [];
-      if (country !== 'unknown' && !existingCountries.includes(country)) {
-        props.Countries = { multi_select: [...existingCountries.map(n => ({ name: n })), { name: country }] };
-      }
-      // Append city in multi-select
-      const existingCities = page.properties.Cities?.multi_select?.map(i => i.name) || [];
-      if (city !== 'unknown' && !existingCities.includes(city)) {
-        props.Cities = { multi_select: [...existingCities.map(n => ({ name: n })), { name: city }] };
-      }
+      // Multi-select Countries
+      const existingCountries = (page.properties.Countries?.multi_select || []).map(i => i.name);
+      const updatedCountries = existingCountries.includes(country)
+        ? existingCountries
+        : existingCountries.concat(country);
+      props.Countries = { multi_select: updatedCountries.map(name => ({ name })) };
+
+      // Multi-select Cities
+      const existingCities = (page.properties.Cities?.multi_select || []).map(i => i.name);
+      const updatedCities = existingCities.includes(city)
+        ? existingCities
+        : existingCities.concat(city);
+      props.Cities = { multi_select: updatedCities.map(name => ({ name })) };
     }
 
-    // Always record last IP
+    // Always record Last IP
     props['Last IP'] = { rich_text: [{ text: { content: clientIp || 'unknown' } }] };
 
-    // Send update if any props exist
-    if (Object.keys(props).length) {
-      await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
-        method: 'PATCH', headers: notionHeaders,
-        body: JSON.stringify({ properties: props })
-      });
-    }
+    // Submit update
+    await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+      method: 'PATCH',
+      headers: notionHeaders,
+      body: JSON.stringify({ properties: props })
+    });
 
     // Redirect
     return { statusCode: 302, headers: { Location: url }, body: '' };
-
   } catch (err) {
-    return { statusCode: 500, body: `Server error: ${err.message}` };
+    return { statusCode: 500, body: `Error: ${err.message}` };
   }
 };
 
-// Helper to fetch URL without updating DB
-async function getUrlWithoutUpdate(headers, db, shortId) {
-  const r = await fetch(`https://api.notion.com/v1/databases/${db}/query`, {
-    method: 'POST', headers,
-    body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } })
-  });
-  const d = await r.json();
-  let u = d.results[0]?.properties.URL.url || '';
-  if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
+// Helper: fetch redirect URL without DB update
+async function fetchUrl(shortId, headers, db) {
+  const res = await fetch(
+    `https://api.notion.com/v1/databases/${db}/query`,
+    { method: 'POST', headers, body: JSON.stringify({ filter: { property: 'Short ID', rich_text: { equals: shortId } } }) }
+  );
+  const js = await res.json();
+  let u = js.results[0]?.properties.URL.url || '';
+  if (u && !/^https?:\/\//i.test(u)) u = `https://${u}`;
   return u;
 }
