@@ -1,5 +1,4 @@
-// Netlify Function: redirect links, track clicks & location, record last IP
-// Skips all updates if request is from a bot or AWS datacenter
+// Netlify Function: redirect links, track clicks & location, record last IP, filter bots & previews
 const lastClickMap = {};
 
 exports.handler = async function(event) {
@@ -14,18 +13,17 @@ exports.handler = async function(event) {
     'Content-Type': 'application/json'
   };
 
-  // Detect bots/crawlers and Notion preview UAs
+  // Detect bots/crawlers, Notion preview, Facebook, Twitter bots
   const ua = (event.headers['user-agent'] || '').toLowerCase();
   const ref = (event.headers['referer'] || '').toLowerCase();
-  const isBotUA = /bot|crawl|spider|slurp|preview|notion/i.test(ua) || ref.includes('notion.so');
+  const isBotUA = /bot|crawl|spider|slurp|facebookexternalhit|twitterbot|preview|notion/i.test(ua) || ref.includes('notion.so');
 
-  // Capture and detect AWS IPs
+  // Capture client IP
   const forwarded = event.headers['x-forwarded-for'] || '';
   const clientIp = forwarded.split(',')[0].trim();
-  const isAws = /^(54|52|34)\./.test(clientIp);
 
-  // If bot or AWS preview, immediately redirect without any DB update
-  if (isBotUA || isAws) {
+  // If UA indicates bot or preview, skip DB updates
+  if (isBotUA) {
     const url = await getUrlWithoutUpdate(notionHeaders, notionDb, shortId);
     return { statusCode: 302, headers: { Location: url }, body: '' };
   }
@@ -78,16 +76,16 @@ exports.handler = async function(event) {
       // Append country in multi-select
       const existingCountries = page.properties.Countries?.multi_select?.map(i => i.name) || [];
       if (country !== 'unknown' && !existingCountries.includes(country)) {
-        props.Countries = { multi_select: [...existingCountries.map(n=>({name:n})), {name: country}] };
+        props.Countries = { multi_select: [...existingCountries.map(n => ({ name: n })), { name: country }] };
       }
       // Append city in multi-select
       const existingCities = page.properties.Cities?.multi_select?.map(i => i.name) || [];
       if (city !== 'unknown' && !existingCities.includes(city)) {
-        props.Cities = { multi_select: [...existingCities.map(n=>({name:n})), {name: city}] };
+        props.Cities = { multi_select: [...existingCities.map(n => ({ name: n })), { name: city }] };
       }
     }
 
-    // Always record last IP for human requests
+    // Always record last IP
     props['Last IP'] = { rich_text: [{ text: { content: clientIp || 'unknown' } }] };
 
     // Send update if any props exist
